@@ -1377,3 +1377,220 @@ class Toolkit:
             error_msg = f"统一情绪分析工具执行失败: {str(e)}"
             logger.error(f"❌ [统一情绪工具] {error_msg}")
             return error_msg
+
+    # ========================================================================
+    # my_fund_support 分支新增：公募基金/ETF 相关工具
+    # 设计：仅 append，不修改任何现有工具方法，便于上游同步零冲突
+    # ========================================================================
+
+    @staticmethod
+    @tool
+    def get_fund_basic_info_unified(
+        symbol: Annotated[str, "基金代码（6 位数字），如 510300、005827"],
+    ) -> str:
+        """
+        获取公募基金/ETF 的基础档案（名称、类型、规模、成立日期、基金公司、基金经理等）。
+        适用于场内 ETF 与场外开放基金。
+        """
+        try:
+            from tradingagents.dataflows.providers.china import get_akshare_fund_provider
+            p = get_akshare_fund_provider()
+            if not p.connected:
+                return f"❌ AKShare 未就绪，无法获取基金 {symbol} 档案"
+
+            lines = [f"# 基金 {symbol} 档案"]
+
+            ok, name_info, err = p.lookup_fund_name(symbol)
+            if ok:
+                lines.append(f"- **基金简称**: {name_info.get('基金简称','-')}")
+                lines.append(f"- **基金类型**: {name_info.get('基金类型','-')}")
+
+            ok, df, err = p.get_fund_profile(symbol)
+            if ok:
+                for row in df.to_dict("records"):
+                    lines.append(f"- **{row.get('item')}**: {row.get('value')}")
+            else:
+                lines.append(f"- *档案接口失败*: {err}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"❌ [基金档案] {symbol} 失败: {e}", exc_info=True)
+            return f"基金档案获取失败: {e}"
+
+    @staticmethod
+    @tool
+    def get_fund_nav_unified(
+        symbol: Annotated[str, "基金代码（6 位数字）"],
+        recent_days: Annotated[int, "返回最近多少个交易日的净值，默认 60"] = 60,
+    ) -> str:
+        """
+        获取场外开放基金的单位净值与累计净值走势（最近 N 个交易日）。
+        ETF 的实时与历史行情请使用 get_etf_market_data_unified。
+        """
+        try:
+            from tradingagents.dataflows.providers.china import get_akshare_fund_provider
+            p = get_akshare_fund_provider()
+            if not p.connected:
+                return f"❌ AKShare 未就绪，无法获取基金 {symbol} 净值"
+
+            ok, df, err = p.get_open_fund_nav(symbol)
+            if not ok:
+                return f"基金 {symbol} 净值获取失败: {err}"
+
+            tail = df.tail(recent_days)
+            first_nav = float(tail.iloc[0]["单位净值"])
+            last_nav = float(tail.iloc[-1]["单位净值"])
+            change_pct = (last_nav / first_nav - 1) * 100 if first_nav else 0
+
+            lines = [
+                f"# 基金 {symbol} 单位净值（最近 {len(tail)} 期）",
+                f"- 期初净值: {first_nav:.4f}（{tail.iloc[0]['净值日期']}）",
+                f"- 最新净值: {last_nav:.4f}（{tail.iloc[-1]['净值日期']}）",
+                f"- 区间涨跌: {change_pct:+.2f}%",
+                "",
+                "## 最近 10 期",
+                "| 日期 | 单位净值 | 日增长率 |",
+                "|------|---------|---------|",
+            ]
+            for row in tail.tail(10).to_dict("records"):
+                lines.append(
+                    f"| {row.get('净值日期')} | {row.get('单位净值')} | "
+                    f"{row.get('日增长率')}% |"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"❌ [基金净值] {symbol} 失败: {e}", exc_info=True)
+            return f"基金净值获取失败: {e}"
+
+    @staticmethod
+    @tool
+    def get_fund_holdings_unified(
+        symbol: Annotated[str, "基金代码（6 位数字）"],
+        year: Annotated[str, "年份，如 2024"] = "",
+    ) -> str:
+        """
+        获取公募基金最新披露的重仓股持仓（来自季报/年报）。
+        """
+        try:
+            from tradingagents.dataflows.providers.china import get_akshare_fund_provider
+            p = get_akshare_fund_provider()
+            if not p.connected:
+                return f"❌ AKShare 未就绪，无法获取基金 {symbol} 持仓"
+
+            if not year:
+                year = str(datetime.now().year)
+
+            ok, df, err = p.get_fund_holdings(symbol, year)
+            if not ok:
+                # 自动回退到上一年
+                prev = str(int(year) - 1)
+                ok, df, err = p.get_fund_holdings(symbol, prev)
+                if not ok:
+                    return f"基金 {symbol} 持仓获取失败（{year}/{prev}）: {err}"
+                year = prev
+
+            quarters = df["季度"].unique().tolist() if "季度" in df.columns else []
+            lines = [
+                f"# 基金 {symbol} 重仓股（{year} 年披露）",
+                f"- 数据期: {', '.join(quarters)}",
+                f"- 记录数: {len(df)}",
+                "",
+                "## 最新季度 Top 10",
+                "| 股票代码 | 股票名称 | 占净值比例 | 持股数 | 持仓市值 |",
+                "|---------|---------|-----------|--------|---------|",
+            ]
+            # 取最新一个季度
+            if quarters:
+                latest = df[df["季度"] == quarters[0]]
+            else:
+                latest = df
+            for row in latest.head(10).to_dict("records"):
+                lines.append(
+                    f"| {row.get('股票代码','-')} | {row.get('股票名称','-')} | "
+                    f"{row.get('占净值比例','-')}% | {row.get('持股数','-')} | "
+                    f"{row.get('持仓市值','-')} |"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"❌ [基金持仓] {symbol} 失败: {e}", exc_info=True)
+            return f"基金持仓获取失败: {e}"
+
+    @staticmethod
+    @tool
+    def get_etf_market_data_unified(
+        symbol: Annotated[str, "ETF 代码（6 位数字），如 510300"],
+        start_date: Annotated[str, "起始日期 yyyy-mm-dd"],
+        end_date: Annotated[str, "结束日期 yyyy-mm-dd"],
+    ) -> str:
+        """
+        获取场内 ETF 的历史 K 线（日线、前复权）。
+        适用于 510/159/588 等场内交易型基金，不适用于场外开放基金。
+        """
+        try:
+            from tradingagents.dataflows.providers.china import get_akshare_fund_provider
+            p = get_akshare_fund_provider()
+            if not p.connected:
+                return f"❌ AKShare 未就绪，无法获取 ETF {symbol}"
+
+            sd = start_date.replace("-", "")
+            ed = end_date.replace("-", "")
+            ok, df, err = p.get_etf_hist(symbol, sd, ed)
+            if not ok:
+                return f"ETF {symbol} 历史数据获取失败: {err}"
+
+            first = df.iloc[0]
+            last = df.iloc[-1]
+            change = (float(last["收盘"]) / float(first["开盘"]) - 1) * 100
+            lines = [
+                f"# ETF {symbol} 历史行情 ({start_date} ~ {end_date})",
+                f"- 交易日数: {len(df)}",
+                f"- 区间开盘: {first['开盘']}（{first['日期']}）",
+                f"- 区间收盘: {last['收盘']}（{last['日期']}）",
+                f"- 区间涨跌: {change:+.2f}%",
+                f"- 区间最高: {df['最高'].max()}",
+                f"- 区间最低: {df['最低'].min()}",
+                f"- 平均成交额: {df['成交额'].mean():.0f}" if "成交额" in df.columns else "",
+                "",
+                "## 最近 10 个交易日",
+                "| 日期 | 开盘 | 收盘 | 最高 | 最低 | 涨跌幅 |",
+                "|------|------|------|------|------|-------|",
+            ]
+            for row in df.tail(10).to_dict("records"):
+                lines.append(
+                    f"| {row.get('日期')} | {row.get('开盘')} | {row.get('收盘')} | "
+                    f"{row.get('最高')} | {row.get('最低')} | {row.get('涨跌幅','-')}% |"
+                )
+            return "\n".join([line for line in lines if line is not None])
+        except Exception as e:
+            logger.error(f"❌ [ETF 行情] {symbol} 失败: {e}", exc_info=True)
+            return f"ETF 行情获取失败: {e}"
+
+    @staticmethod
+    @tool
+    def get_etf_realtime_unified(
+        symbol: Annotated[str, "ETF 代码（6 位数字）"],
+    ) -> str:
+        """
+        获取单只场内 ETF 的实时行情快照（含 IOPV 估值与折溢价）。
+        """
+        try:
+            from tradingagents.dataflows.providers.china import get_akshare_fund_provider
+            p = get_akshare_fund_provider()
+            if not p.connected:
+                return f"❌ AKShare 未就绪，无法获取 ETF {symbol}"
+
+            ok, row, err = p.get_etf_spot(symbol)
+            if not ok:
+                return f"ETF {symbol} 实时行情获取失败: {err}"
+
+            keys = ["代码", "名称", "最新价", "IOPV实时估值", "基金折价率",
+                    "涨跌额", "涨跌幅", "成交量", "成交额", "开盘价", "最高价",
+                    "最低价", "昨收"]
+            lines = [f"# ETF {symbol} 实时快照"]
+            for k in keys:
+                if k in row:
+                    lines.append(f"- **{k}**: {row[k]}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"❌ [ETF 实时] {symbol} 失败: {e}", exc_info=True)
+            return f"ETF 实时行情获取失败: {e}"

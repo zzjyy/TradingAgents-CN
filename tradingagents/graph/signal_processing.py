@@ -60,6 +60,17 @@ class SignalProcessor:
         currency = market_info['currency_name']
         currency_symbol = market_info['currency_symbol']
 
+        # my_fund_support 分支新增：基金/ETF 走基金专用提取逻辑
+        try:
+            from tradingagents.utils.stock_validator import StockDataPreparer
+            is_fund = StockDataPreparer._is_fund_code(stock_symbol) if stock_symbol else False
+        except Exception:
+            is_fund = False
+
+        if is_fund:
+            logger.info(f"🔍 [SignalProcessor] 检测到基金/ETF 代码 {stock_symbol}，走基金语义分支")
+            return self._process_fund_signal(full_signal, stock_symbol)
+
         logger.info(f"🔍 [SignalProcessor] 处理信号: 股票={stock_symbol}, 市场={market_info['market_name']}, 货币={currency}",
                    extra={'stock_symbol': stock_symbol, 'market': market_info['market_name'], 'currency': currency})
 
@@ -333,4 +344,139 @@ class SignalProcessor:
             'confidence': 0.5,
             'risk_score': 0.5,
             'reasoning': '输入数据无效，默认持有建议'
+        }
+
+    # ------------------------------------------------------------------
+    # my_fund_support 分支新增：基金/ETF 信号处理
+    # 基金语义与个股不同：
+    #   - 动作: 申购 / 持有 / 赎回 / 转换（场外）或 买入 / 持有 / 卖出（ETF 场内同股票）
+    #   - 目标量化指标: 目标仓位权重 (0-1)，而非目标价（场外基金 T+1 净值无连续价格）
+    #   - ETF 仍可有目标价（因为有实时盘中价），但权重比价格更重要
+    # ------------------------------------------------------------------
+
+    def _process_fund_signal(self, full_signal: str, stock_symbol: str = None) -> dict:
+        """从分析报告中提取基金/ETF 的结构化决策。"""
+        is_etf = bool(stock_symbol and stock_symbol[:3] in (
+            "510", "511", "512", "513", "515", "516", "517", "518",
+            "159", "501", "502", "588", "560", "561", "562", "563"
+        ))
+        action_set = "申购 / 持有 / 赎回 / 转换" if not is_etf else "买入 / 持有 / 卖出"
+        default_action = "持有"
+
+        system_prompt = f"""您是一位专业的基金分析助手，负责从研究报告中提取结构化的基金投资决策。
+
+基金代码 {stock_symbol or '未知'} 属于{'场内 ETF' if is_etf else '场外公募基金'}。
+
+请以 JSON 返回，字段如下：
+
+{{
+    "action": "{action_set} 之一",
+    "target_weight": 数字(0-1之间，建议在组合中的目标仓位比例),
+    "confidence": 数字(0-1),
+    "risk_score": 数字(0-1),
+    "reasoning": "决策的主要理由（中文）"
+}}
+
+要点：
+1. action 必须是上述选项之一，使用中文
+2. target_weight 表示在用户基金组合中的目标占比（如 0.15 = 15%）
+3. 若报告中未明确仓位建议，按"申购→0.1、加仓→0.2、持有→保持现状（用 0.0 占位）、减仓→-0.1、赎回→0.0"给出
+4. 所有字段必须使用中文，禁止英文 buy/hold/sell
+"""
+
+        messages = [
+            ("system", system_prompt),
+            ("human", full_signal),
+        ]
+
+        try:
+            response = self.quick_thinking_llm.invoke(messages).content
+            import json, re
+
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not json_match:
+                return self._extract_simple_fund_decision(full_signal, is_etf)
+
+            decision_data = json.loads(json_match.group())
+
+            valid_actions = {"申购", "持有", "赎回", "转换"} if not is_etf else {"买入", "持有", "卖出"}
+            action = decision_data.get('action', default_action)
+            if action not in valid_actions:
+                action_map = {
+                    'buy': '申购', 'hold': '持有', 'sell': '赎回',
+                    'BUY': '申购', 'HOLD': '持有', 'SELL': '赎回',
+                    '买入': '申购', '卖出': '赎回',  # 场外基金把买卖映射为申赎
+                }
+                if is_etf:
+                    action_map = {
+                        'buy': '买入', 'hold': '持有', 'sell': '卖出',
+                        'BUY': '买入', 'HOLD': '持有', 'SELL': '卖出',
+                        '申购': '买入', '赎回': '卖出',
+                    }
+                action = action_map.get(action, default_action)
+
+            try:
+                target_weight = float(decision_data.get('target_weight', 0.0))
+                target_weight = max(-1.0, min(1.0, target_weight))
+            except (TypeError, ValueError):
+                target_weight = 0.0
+
+            result = {
+                'action': action,
+                'target_price': None,
+                'target_weight': target_weight,
+                'confidence': float(decision_data.get('confidence', 0.7)),
+                'risk_score': float(decision_data.get('risk_score', 0.5)),
+                'reasoning': decision_data.get('reasoning', '基于综合分析的基金投资建议'),
+                'asset_type': 'etf' if is_etf else 'fund',
+            }
+            logger.info(f"🔍 [SignalProcessor/Fund] 处理结果: {result}")
+            return result
+
+        except Exception as e:
+            logger.error(f"基金信号处理错误: {e}", exc_info=True)
+            return self._extract_simple_fund_decision(full_signal, is_etf)
+
+    def _extract_simple_fund_decision(self, text: str, is_etf: bool) -> dict:
+        """基金信号的简单文本回退提取。"""
+        import re
+
+        if is_etf:
+            valid = {'买入', '持有', '卖出'}
+            default = '持有'
+        else:
+            valid = {'申购', '持有', '赎回', '转换'}
+            default = '持有'
+
+        action = default
+        for word in valid:
+            if word in text:
+                action = word
+                break
+        # 兜底：从英文/股票术语映射
+        if action == default:
+            if re.search(r'买入|buy', text, re.IGNORECASE):
+                action = '买入' if is_etf else '申购'
+            elif re.search(r'卖出|sell', text, re.IGNORECASE):
+                action = '卖出' if is_etf else '赎回'
+
+        # 提取目标权重
+        target_weight = 0.0
+        weight_match = re.search(r'(?:目标|建议)?(?:仓位|权重)[：:]?\s*(\d+(?:\.\d+)?)\s*%?', text)
+        if weight_match:
+            try:
+                w = float(weight_match.group(1))
+                target_weight = w / 100 if w > 1 else w
+                target_weight = max(-1.0, min(1.0, target_weight))
+            except ValueError:
+                pass
+
+        return {
+            'action': action,
+            'target_price': None,
+            'target_weight': target_weight,
+            'confidence': 0.6,
+            'risk_score': 0.5,
+            'reasoning': '基于综合分析的基金投资建议（文本回退提取）',
+            'asset_type': 'etf' if is_etf else 'fund',
         }
