@@ -152,7 +152,8 @@ class StockDataPreparer:
             market_type=market_type
         )
     
-    # my_fund_support 分支新增：明确的 ETF/开放基金代码前缀
+    # === start edit by my_fund_support ===
+    # 明确的 ETF/开放基金代码前缀
     # 仅放入「不会与 A 股股票代码混淆」的安全前缀；000XXX/110XXX 等存在歧义的不收入
     _FUND_CODE_PREFIXES = (
         # ETF（场内）
@@ -168,14 +169,17 @@ class StockDataPreparer:
         if not re.match(r'^\d{6}$', stock_code):
             return False
         return stock_code[:3] in cls._FUND_CODE_PREFIXES
+    # === end edit by my_fund_support ===
 
     def _detect_market_type(self, stock_code: str) -> str:
         """自动检测市场类型"""
         stock_code = stock_code.strip().upper()
 
-        # my_fund_support 分支新增：先识别基金/ETF（必须在 A股 判断之前）
+        # === start edit by my_fund_support ===
+        # 先识别基金/ETF（必须在 A股 判断之前）
         if self._is_fund_code(stock_code):
             return "基金"
+        # === end edit by my_fund_support ===
 
         # A股：6位数字
         if re.match(r'^\d{6}$', stock_code):

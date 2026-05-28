@@ -1378,8 +1378,9 @@ class Toolkit:
             logger.error(f"❌ [统一情绪工具] {error_msg}")
             return error_msg
 
+    # === start edit by my_fund_support ===
     # ========================================================================
-    # my_fund_support 分支新增：公募基金/ETF 相关工具
+    # 公募基金/ETF 相关工具
     # 设计：仅 append，不修改任何现有工具方法，便于上游同步零冲突
     # ========================================================================
 
@@ -1594,3 +1595,4 @@ class Toolkit:
         except Exception as e:
             logger.error(f"❌ [ETF 实时] {symbol} 失败: {e}", exc_info=True)
             return f"ETF 实时行情获取失败: {e}"
+    # === end edit by my_fund_support ===

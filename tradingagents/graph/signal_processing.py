@@ -60,7 +60,8 @@ class SignalProcessor:
         currency = market_info['currency_name']
         currency_symbol = market_info['currency_symbol']
 
-        # my_fund_support 分支新增：基金/ETF 走基金专用提取逻辑
+        # === start edit by my_fund_support ===
+        # 基金/ETF 走基金专用提取逻辑
         try:
             from tradingagents.utils.stock_validator import StockDataPreparer
             is_fund = StockDataPreparer._is_fund_code(stock_symbol) if stock_symbol else False
@@ -70,6 +71,7 @@ class SignalProcessor:
         if is_fund:
             logger.info(f"🔍 [SignalProcessor] 检测到基金/ETF 代码 {stock_symbol}，走基金语义分支")
             return self._process_fund_signal(full_signal, stock_symbol)
+        # === end edit by my_fund_support ===
 
         logger.info(f"🔍 [SignalProcessor] 处理信号: 股票={stock_symbol}, 市场={market_info['market_name']}, 货币={currency}",
                    extra={'stock_symbol': stock_symbol, 'market': market_info['market_name'], 'currency': currency})
@@ -346,8 +348,9 @@ class SignalProcessor:
             'reasoning': '输入数据无效，默认持有建议'
         }
 
+    # === start edit by my_fund_support ===
     # ------------------------------------------------------------------
-    # my_fund_support 分支新增：基金/ETF 信号处理
+    # 基金/ETF 信号处理
     # 基金语义与个股不同：
     #   - 动作: 申购 / 持有 / 赎回 / 转换（场外）或 买入 / 持有 / 卖出（ETF 场内同股票）
     #   - 目标量化指标: 目标仓位权重 (0-1)，而非目标价（场外基金 T+1 净值无连续价格）
@@ -480,3 +483,4 @@ class SignalProcessor:
             'reasoning': '基于综合分析的基金投资建议（文本回退提取）',
             'asset_type': 'etf' if is_etf else 'fund',
         }
+    # === end edit by my_fund_support ===

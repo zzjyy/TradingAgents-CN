@@ -35,7 +35,8 @@ except ImportError:
     get_fundamentals_snapshot = None
     FUNDAMENTALS_SNAPSHOT_AVAILABLE = False
 
-# 导入 AKShare 基金提供器（my_fund_support 分支新增）
+# === start edit by my_fund_support ===
+# 导入 AKShare 基金提供器
 try:
     from .akshare_fund import AKShareFundProvider, get_akshare_fund_provider
     AKSHARE_FUND_AVAILABLE = True
@@ -43,6 +44,7 @@ except ImportError:
     AKShareFundProvider = None
     get_akshare_fund_provider = None
     AKSHARE_FUND_AVAILABLE = False
+# === end edit by my_fund_support ===
 
 __all__ = [
     'AKShareProvider',
@@ -53,8 +55,10 @@ __all__ = [
     'BAOSTOCK_AVAILABLE',
     'get_fundamentals_snapshot',
     'FUNDAMENTALS_SNAPSHOT_AVAILABLE',
+    # === start edit by my_fund_support ===
     'AKShareFundProvider',
     'get_akshare_fund_provider',
     'AKSHARE_FUND_AVAILABLE',
+    # === end edit by my_fund_support ===
 ]
 
