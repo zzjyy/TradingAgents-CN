@@ -120,10 +120,16 @@ class AKShareFundProvider:
         period: str = "daily",
         adjust: str = "qfq",
     ) -> FundResult:
-        """ETF 历史行情（K 线）。日期格式 YYYYMMDD。"""
+        """ETF 历史行情（K 线）。日期格式 YYYYMMDD。
+
+        主源: 东方财富 fund_etf_hist_em（支持日期范围 + 复权，但 WSL 上常抖动）
+        备源: 新浪 fund_etf_hist_sina（稳定，但返回全量 + 英文列名，需切片重命名）
+        """
         guard = self._guard()
         if guard:
             return guard
+
+        # 1) 主源：东方财富
         try:
             df = self.ak.fund_etf_hist_em(
                 symbol=symbol,
@@ -132,12 +138,36 @@ class AKShareFundProvider:
                 end_date=end_date,
                 adjust=adjust,
             )
+            if df is not None and not df.empty:
+                return True, df, ""
+        except Exception as e:
+            logger.debug(f"[{self.name}] fund_etf_hist_em({symbol}) 失败，转新浪: {e}")
+
+        # 2) 备源：新浪（symbol 要加 sh/sz 前缀）
+        try:
+            sina_sym = ("sh" if symbol.startswith("5") else "sz") + symbol
+            df = self.ak.fund_etf_hist_sina(symbol=sina_sym)
             if df is None or df.empty:
-                return False, None, f"ETF {symbol} 历史数据为空"
+                return False, None, f"ETF {symbol} 新浪源也无数据"
+            # 列名英文→中文，与东方财富格式对齐
+            df = df.rename(columns={
+                "date": "日期", "open": "开盘", "high": "最高",
+                "low": "最低", "close": "收盘", "volume": "成交量",
+                "amount": "成交额",
+            })
+            # 日期字符串切片 (新浪 date 是 datetime.date)
+            df["日期"] = df["日期"].astype(str)
+            sd_iso = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+            ed_iso = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+            df = df[(df["日期"] >= sd_iso) & (df["日期"] <= ed_iso)].reset_index(drop=True)
+            if df.empty:
+                return False, None, f"ETF {symbol} 日期范围内无数据"
+            # 补充 涨跌幅 列（新浪不提供）
+            df["涨跌幅"] = (df["收盘"].pct_change() * 100).round(2).fillna(0)
             return True, df, ""
         except Exception as e:
-            logger.debug(f"[{self.name}] get_etf_hist({symbol}) 失败: {e}")
-            return False, None, f"{type(e).__name__}: {e}"
+            logger.debug(f"[{self.name}] fund_etf_hist_sina({symbol}) 也失败: {e}")
+            return False, None, f"主源+备源均失败: {type(e).__name__}: {e}"
 
     # ----- 3. 开放基金净值 -----
 
@@ -236,10 +266,29 @@ class AKShareFundProvider:
     # ----- 7. 基金档案（雪球） -----
 
     def get_fund_profile(self, symbol: str) -> FundResult:
-        """基金基础档案（来自雪球源）。返回 DataFrame [item, value]。"""
+        """基金基础档案。返回 DataFrame [item, value]。
+
+        ETF (510/159/...) 雪球档案 API 不支持，会抛 KeyError: 'data'。
+        因此 ETF 走 ETF spot 拼装，开放基金维持雪球。
+        """
         guard = self._guard()
         if guard:
             return guard
+
+        if self._is_etf_code(symbol):
+            ok, row, err = self.get_etf_spot(symbol)
+            if not ok or row is None:
+                return False, None, f"ETF {symbol} 行情失败: {err}"
+            # row 已经是 dict（get_etf_spot 内部 .iloc[0].to_dict()）
+            keys = ["代码", "名称", "最新价", "涨跌幅", "成交额", "流通市值",
+                    "IOPV实时估值", "基金折价率"]
+            import pandas as pd
+            records = [{"item": k, "value": row[k]} for k in keys if k in row]
+            if not records:
+                return False, None, f"ETF {symbol} 档案无可用字段"
+            return True, pd.DataFrame(records), ""
+
+        # 场外开放基金走雪球档案
         try:
             df = self.ak.fund_individual_basic_info_xq(symbol=symbol)
             if df is None or df.empty:
