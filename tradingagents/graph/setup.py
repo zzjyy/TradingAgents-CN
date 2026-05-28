@@ -23,6 +23,13 @@ from tradingagents.agents import (
 from tradingagents.agents.utils.agent_states import AgentState
 from tradingagents.agents.utils.agent_utils import Toolkit
 
+# === start edit by my_fund_support ===
+# 基金资产类型的三个平行分析师（按 config["asset_type"] == "fund" 路由替换）
+from tradingagents.agents.analysts.fund_market_analyst import create_fund_market_analyst
+from tradingagents.agents.analysts.fund_holdings_analyst import create_fund_holdings_analyst
+from tradingagents.agents.analysts.fund_manager_analyst import create_fund_manager_analyst
+# === end edit by my_fund_support ===
+
 from .conditional_logic import ConditionalLogic
 
 # 导入统一日志系统
@@ -82,6 +89,15 @@ class GraphSetup:
         delete_nodes = {}
         tool_nodes = {}
 
+        # === start edit by my_fund_support ===
+        # 资产类型路由：当 config["asset_type"] == "fund" 时，
+        # market/fundamentals/social 三个槽位替换为基金专用分析师
+        # 输出字段保持不变（market_report / fundamentals_report / sentiment_report）
+        is_fund_mode = str(self.config.get("asset_type", "")).lower() == "fund"
+        if is_fund_mode:
+            logger.info("🪙 [setup_graph] asset_type=fund，启用基金专用分析师路由")
+        # === end edit by my_fund_support ===
+
         if "market" in selected_analysts:
             # 现在所有LLM都使用标准市场分析师（包括阿里百炼的OpenAI兼容适配器）
             llm_provider = self.config.get("llm_provider", "").lower()
@@ -102,17 +118,33 @@ class GraphSetup:
             else:
                 logger.debug(f"📈 [DEBUG] 使用标准市场分析师")
 
-            # 所有LLM都使用标准分析师
-            analyst_nodes["market"] = create_market_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            # === start edit by my_fund_support ===
+            if is_fund_mode:
+                logger.info("🪙 [setup_graph] market 槽位 -> create_fund_market_analyst")
+                analyst_nodes["market"] = create_fund_market_analyst(
+                    self.quick_thinking_llm, self.toolkit
+                )
+            else:
+                # 所有LLM都使用标准分析师
+                analyst_nodes["market"] = create_market_analyst(
+                    self.quick_thinking_llm, self.toolkit
+                )
+            # === end edit by my_fund_support ===
             delete_nodes["market"] = create_msg_delete()
             tool_nodes["market"] = self.tool_nodes["market"]
 
         if "social" in selected_analysts:
-            analyst_nodes["social"] = create_social_media_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            # === start edit by my_fund_support ===
+            if is_fund_mode:
+                logger.info("🪙 [setup_graph] social 槽位 -> create_fund_manager_analyst")
+                analyst_nodes["social"] = create_fund_manager_analyst(
+                    self.quick_thinking_llm, self.toolkit
+                )
+            else:
+                analyst_nodes["social"] = create_social_media_analyst(
+                    self.quick_thinking_llm, self.toolkit
+                )
+            # === end edit by my_fund_support ===
             delete_nodes["social"] = create_msg_delete()
             tool_nodes["social"] = self.tool_nodes["social"]
 
@@ -143,10 +175,18 @@ class GraphSetup:
             else:
                 logger.debug(f"📊 [DEBUG] 使用标准基本面分析师")
 
-            # 所有LLM都使用标准分析师（包含强制工具调用机制）
-            analyst_nodes["fundamentals"] = create_fundamentals_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            # === start edit by my_fund_support ===
+            if is_fund_mode:
+                logger.info("🪙 [setup_graph] fundamentals 槽位 -> create_fund_holdings_analyst")
+                analyst_nodes["fundamentals"] = create_fund_holdings_analyst(
+                    self.quick_thinking_llm, self.toolkit
+                )
+            else:
+                # 所有LLM都使用标准分析师（包含强制工具调用机制）
+                analyst_nodes["fundamentals"] = create_fundamentals_analyst(
+                    self.quick_thinking_llm, self.toolkit
+                )
+            # === end edit by my_fund_support ===
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
