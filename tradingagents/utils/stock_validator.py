@@ -152,22 +152,43 @@ class StockDataPreparer:
             market_type=market_type
         )
     
+    # my_fund_support 分支新增：明确的 ETF/开放基金代码前缀
+    # 仅放入「不会与 A 股股票代码混淆」的安全前缀；000XXX/110XXX 等存在歧义的不收入
+    _FUND_CODE_PREFIXES = (
+        # ETF（场内）
+        "510", "511", "512", "513", "515", "516", "517", "518",
+        "159", "501", "502", "588", "560", "561", "562", "563",
+        # 场外开放基金（OF / LOF / 分级）
+        "519", "161", "162", "163", "164", "165", "166", "167", "168", "169",
+    )
+
+    @classmethod
+    def _is_fund_code(cls, stock_code: str) -> bool:
+        """判断是否为公募基金/ETF 代码（仅识别无歧义的前缀）。"""
+        if not re.match(r'^\d{6}$', stock_code):
+            return False
+        return stock_code[:3] in cls._FUND_CODE_PREFIXES
+
     def _detect_market_type(self, stock_code: str) -> str:
         """自动检测市场类型"""
         stock_code = stock_code.strip().upper()
-        
+
+        # my_fund_support 分支新增：先识别基金/ETF（必须在 A股 判断之前）
+        if self._is_fund_code(stock_code):
+            return "基金"
+
         # A股：6位数字
         if re.match(r'^\d{6}$', stock_code):
             return "A股"
-        
+
         # 港股：4-5位数字.HK 或 纯4-5位数字
         if re.match(r'^\d{4,5}\.HK$', stock_code) or re.match(r'^\d{4,5}$', stock_code):
             return "港股"
-        
+
         # 美股：1-5位字母
         if re.match(r'^[A-Z]{1,5}$', stock_code):
             return "美股"
-        
+
         return "未知"
 
     def _get_hk_network_limitation_suggestion(self) -> str:
