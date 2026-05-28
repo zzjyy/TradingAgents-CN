@@ -49,6 +49,13 @@ class UnifiedNewsAnalyzer:
             result = self._get_hk_share_news(stock_code, max_news, model_info)
         elif stock_type == "美股":
             result = self._get_us_share_news(stock_code, max_news, model_info)
+        # === start edit by my_fund_support ===
+        elif stock_type == "基金":
+            # 基金/ETF 暂无专用新闻接口，先复用 A股 新闻渠道（按代码搜行业/政策相关新闻）。
+            # 未来可在此分支替换为基金专用新闻源（基金公司公告、季报评述等）。
+            logger.info(f"[统一新闻工具] 基金/ETF 代码 {stock_code} 复用 A股 新闻渠道")
+            result = self._get_a_share_news(stock_code, max_news, model_info)
+        # === end edit by my_fund_support ===
         else:
             # 默认使用A股逻辑
             result = self._get_a_share_news(stock_code, max_news, model_info)
@@ -64,28 +71,52 @@ class UnifiedNewsAnalyzer:
         
         return result
     
+    # === start edit by my_fund_support ===
+    # 基金/ETF 代码前缀（与 stock_validator._FUND_CODE_PREFIXES 同步）
+    _FUND_CODE_PREFIXES = (
+        # ETF / LOF
+        "510", "511", "512", "513", "515", "516", "517", "518",
+        "159", "501", "502", "588", "560", "561", "562", "563",
+        # 场外开放式基金
+        "519", "161", "162", "163", "164", "165", "166", "167", "168", "169",
+    )
+
+    @classmethod
+    def _is_fund_code(cls, code: str) -> bool:
+        """识别国内公募基金/ETF 6 位代码。"""
+        if not code or len(code) != 6 or not code.isdigit():
+            return False
+        return code[:3] in cls._FUND_CODE_PREFIXES
+    # === end edit by my_fund_support ===
+
     def _identify_stock_type(self, stock_code: str) -> str:
         """识别股票类型"""
         stock_code = stock_code.upper().strip()
-        
+
+        # === start edit by my_fund_support ===
+        # 基金/ETF 优先判断（必须在 A股/港股之前，因为 510/159 等会被误判为港股 5 位代码）
+        if self._is_fund_code(stock_code):
+            return "基金"
+        # === end edit by my_fund_support ===
+
         # A股判断
         if re.match(r'^(00|30|60|68)\d{4}$', stock_code):
             return "A股"
         elif re.match(r'^(SZ|SH)\d{6}$', stock_code):
             return "A股"
-        
+
         # 港股判断
         elif re.match(r'^\d{4,5}\.HK$', stock_code):
             return "港股"
         elif re.match(r'^\d{4,5}$', stock_code) and len(stock_code) <= 5:
             return "港股"
-        
+
         # 美股判断
         elif re.match(r'^[A-Z]{1,5}$', stock_code):
             return "美股"
         elif '.' in stock_code and not stock_code.endswith('.HK'):
             return "美股"
-        
+
         # 默认按A股处理
         else:
             return "A股"
