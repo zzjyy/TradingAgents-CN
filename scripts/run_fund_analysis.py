@@ -48,7 +48,20 @@ def parse_args() -> argparse.Namespace:
                         help="LLM 提供商（默认 deepseek）")
     parser.add_argument("--model", default="deepseek-chat",
                         help="LLM 模型名（默认 deepseek-chat）")
+    parser.add_argument("--output", default=None,
+                        help="把最终决策/数据快照写入此文件（默认仅 stdout）。"
+                             "传 'auto' 则写入 reports/fund_analysis/<symbol>_<date>.md")
     return parser.parse_args()
+
+
+def _resolve_output_path(output_arg: str, symbol: str, suffix: str) -> str:
+    """解析 --output 参数。'auto' → reports/fund_analysis/<symbol>_<date>_<suffix>.md。"""
+    if output_arg == "auto":
+        from datetime import date as _date
+        out_dir = os.path.join(PROJ_ROOT, "reports", "fund_analysis")
+        os.makedirs(out_dir, exist_ok=True)
+        return os.path.join(out_dir, f"{symbol}_{_date.today().isoformat()}_{suffix}.md")
+    return output_arg
 
 
 def _load_akshare_fund_module():
@@ -76,8 +89,39 @@ def _is_fund_code_local(symbol: str) -> bool:
     }
 
 
-def run_data_only(symbol: str, recent_days: int) -> int:
+class _Tee:
+    """同时写到原 stdout 和内存缓冲区。未实现的属性透传给底层流。"""
+    def __init__(self, stream):
+        self._stream = stream
+        self.buffer_lines = []
+    def write(self, s):
+        self._stream.write(s)
+        self.buffer_lines.append(s)
+    def flush(self):
+        self._stream.flush()
+    def isatty(self) -> bool:
+        return False
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+    def text(self) -> str:
+        return "".join(self.buffer_lines)
+
+
+def run_data_only(symbol: str, recent_days: int, output: str = None) -> int:
     """不调用 LLM，只验证数据层是否能跑通。"""
+    import contextlib
+    tee = _Tee(sys.stdout)
+    with contextlib.redirect_stdout(tee):
+        rc = _run_data_only_impl(symbol, recent_days)
+    if output:
+        out_path = _resolve_output_path(output, symbol, "data_only")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(tee.text())
+        print(f"\n[输出] 数据快照已写入: {out_path}")
+    return rc
+
+
+def _run_data_only_impl(symbol: str, recent_days: int) -> int:
     print(f"\n{'='*60}")
     print(f"基金/ETF 数据快照: {symbol}")
     print(f"{'='*60}\n")
@@ -158,7 +202,8 @@ def run_data_only(symbol: str, recent_days: int) -> int:
     return 0
 
 
-def run_full(symbol: str, analysis_date: str, llm_provider: str, model: str) -> int:
+def run_full(symbol: str, analysis_date: str, llm_provider: str, model: str,
+             output: str = None) -> int:
     """完整 LangGraph 多智能体分析。需要 LLM API Key。"""
     print(f"\n{'='*60}")
     print(f"基金/ETF 多智能体分析: {symbol} @ {analysis_date}")
@@ -182,12 +227,34 @@ def run_full(symbol: str, analysis_date: str, llm_provider: str, model: str) -> 
     config["asset_type"] = "fund"
 
     ta = TradingAgentsGraph(debug=True, config=config)
-    _, decision = ta.propagate(symbol, analysis_date)
+    state, decision = ta.propagate(symbol, analysis_date)
 
     print("\n" + "=" * 60)
     print("最终决策:")
     print("=" * 60)
     print(decision)
+
+    if output:
+        out_path = _resolve_output_path(output, symbol, "full")
+        sections = [
+            ("市场分析师", "market_report"),
+            ("基本面/持仓穿透", "fundamentals_report"),
+            ("情绪分析师", "sentiment_report"),
+            ("新闻分析师", "news_report"),
+            ("研究经理 / 投资计划", "investment_plan"),
+            ("交易员决策", "trader_investment_plan"),
+            ("风险经理 / 最终决策", "final_trade_decision"),
+        ]
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(f"# {symbol} 多智能体分析报告\n\n")
+            f.write(f"**分析日期**: {analysis_date}\n")
+            f.write(f"**LLM**: {llm_provider} / {model}\n\n---\n\n")
+            for title, key in sections:
+                content = (state or {}).get(key)
+                if content:
+                    f.write(f"## {title}\n\n{content}\n\n---\n\n")
+            f.write(f"## 最终决策（signal_processing 提取）\n\n```\n{decision}\n```\n")
+        print(f"\n[输出] 完整报告已写入: {out_path}")
     return 0
 
 
@@ -195,8 +262,8 @@ def main() -> int:
     args = parse_args()
 
     if args.data_only:
-        return run_data_only(args.symbol, args.recent_days)
-    return run_full(args.symbol, args.date, args.llm_provider, args.model)
+        return run_data_only(args.symbol, args.recent_days, args.output)
+    return run_full(args.symbol, args.date, args.llm_provider, args.model, args.output)
 
 
 if __name__ == "__main__":
